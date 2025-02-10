@@ -7,7 +7,10 @@ use App\Models\Sale;
 use App\Services\SaleService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Barryvdh\DomPDF\Facade\Pdf;
+use Exception;
+use Illuminate\Validation\ValidationException;
 
 class SaleController extends Controller
 {
@@ -20,20 +23,32 @@ class SaleController extends Controller
 
     public function index()
     {
-        $sales = Sale::with('items.product')
-            ->latest()
-            ->paginate(10);
+        try {
+            $sales = Sale::with('items.product')
+                ->latest()
+                ->paginate(10);
 
-        return view('sales.index', compact('sales'));
+            return view('sales.index', compact('sales'));
+        } catch (Exception $e) {
+            Log::error('Error fetching sales: ' . $e->getMessage());
+            return redirect()->back()
+                ->with('error', 'An error occurred while fetching sales. Please try again.');
+        }
     }
 
     public function create()
     {
-        $products = Product::where('stock', '>', 0)
-            ->orderBy('name')
-            ->get(['id', 'name', 'price', 'stock']);
+        try {
+            $products = Product::where('stock', '>', 0)
+                ->orderBy('name')
+                ->get(['id', 'name', 'price', 'stock']);
 
-        return view('sales.create', compact('products'));
+            return view('sales.create', compact('products'));
+        } catch (Exception $e) {
+            Log::error('Error loading create sale page: ' . $e->getMessage());
+            return redirect()->back()
+                ->with('error', 'An error occurred while loading the create sale page. Please try again.');
+        }
     }
 
     public function store(Request $request)
@@ -52,8 +67,11 @@ class SaleController extends Controller
             // Check stock availability
             foreach ($validated['items'] as $item) {
                 $product = Product::find($item['product_id']);
+                if (!$product) {
+                    throw new Exception("Product not found");
+                }
                 if ($product->stock < $item['quantity']) {
-                    throw new \Exception("Insufficient stock for product: {$product->name}");
+                    throw new Exception("Insufficient stock for product: {$product->name}");
                 }
             }
 
@@ -64,9 +82,15 @@ class SaleController extends Controller
             return redirect()
                 ->route('sales.show', $sale)
                 ->with('success', 'Sale completed successfully');
-
-        } catch (\Exception $e) {
+        } catch (ValidationException $e) {
             DB::rollBack();
+            return back()
+                ->withErrors($e->errors())
+                ->withInput()
+                ->with('error', 'Please check the form for errors');
+        } catch (Exception $e) {
+            DB::rollBack();
+            Log::error('Error creating sale: ' . $e->getMessage());
             return back()
                 ->withInput()
                 ->with('error', 'Error creating sale: ' . $e->getMessage());
@@ -75,8 +99,14 @@ class SaleController extends Controller
 
     public function show(Sale $sale)
     {
-        $sale->load(['items.product']);
-        return view('sales.show', compact('sale'));
+        try {
+            $sale->load(['items.product']);
+            return view('sales.show', compact('sale'));
+        } catch (Exception $e) {
+            Log::error('Error showing sale details: ' . $e->getMessage());
+            return redirect()->back()
+                ->with('error', 'An error occurred while loading sale details. Please try again.');
+        }
     }
 
     public function generateInvoice(Sale $sale)
@@ -95,9 +125,10 @@ class SaleController extends Controller
             ]);
 
             return $pdf->download("invoice-{$sale->invoice_number}.pdf");
-
-        } catch (\Exception $e) {
-            return back()->with('error', 'Error generating invoice: ' . $e->getMessage());
+        } catch (Exception $e) {
+            Log::error('Error generating invoice: ' . $e->getMessage());
+            return back()
+                ->with('error', 'Error generating invoice: ' . $e->getMessage());
         }
     }
 
@@ -105,7 +136,7 @@ class SaleController extends Controller
     {
         try {
             if ($sale->payment_status === 'completed') {
-                throw new \Exception('Cannot delete a completed sale');
+                throw new Exception('Cannot delete a completed sale');
             }
 
             DB::beginTransaction();
@@ -113,6 +144,9 @@ class SaleController extends Controller
             // Restore product stock
             foreach ($sale->items as $item) {
                 $product = $item->product;
+                if (!$product) {
+                    throw new Exception('Product not found for sale item');
+                }
                 $product->increment('stock', $item->quantity);
             }
 
@@ -123,10 +157,11 @@ class SaleController extends Controller
             return redirect()
                 ->route('sales.index')
                 ->with('success', 'Sale cancelled successfully');
-
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             DB::rollBack();
-            return back()->with('error', 'Error cancelling sale: ' . $e->getMessage());
+            Log::error('Error cancelling sale: ' . $e->getMessage());
+            return back()
+                ->with('error', 'Error cancelling sale: ' . $e->getMessage());
         }
     }
 }
